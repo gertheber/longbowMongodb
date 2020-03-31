@@ -2826,4 +2826,76 @@ describe('Change Streams', function() {
       });
     });
   });
+
+  describe('startAfter', function() {
+    let client;
+    let coll;
+    let startAfter;
+
+    beforeEach(function(done) {
+      const configuration = this.configuration;
+      client = configuration.newClient();
+      client.connect(() => {
+        coll = client.db('integration_tests').collection('setupAfterTest');
+        const watch = coll.watch();
+        watch.on('change', change => {
+          if (change.operationType !== 'drop') return;
+          startAfter = change._id;
+          // console.log({ startAfter });
+        });
+        setTimeout(() =>
+          coll.insertOne({ x: 1 }, { w: 'majority', j: true }, () => {
+            coll.drop(() => {
+              coll.insertOne({ x: 2 }, { w: 'majority', j: true }, () => {
+                watch.close(done);
+              });
+            });
+          })
+        );
+      });
+    });
+
+    afterEach(function(done) {
+      client.close(done);
+    });
+
+    it.only('should work with events', {
+      metadata: { requires: { topology: 'replicaset', mongodb: '>=4.1.1' } },
+      test: function(done) {
+        const watch = coll.watch([], { startAfter });
+        // console.log(watch.cursor.operation);
+        watch.once('change', change => {
+          expect(change.operationType).to.equal('insert');
+          expect(change.fullDocument).to.include({ x: 2 });
+          watch.close();
+        });
+        watch.on('close', done);
+      }
+    });
+
+    it.only('should work with callbacks', {
+      metadata: { requires: { topology: 'replicaset', mongodb: '>=4.1.1' } },
+      test: function() {
+        const watch = coll.watch([], { startAfter });
+        let bucket = [];
+        function exhaust() {
+          return watch.hasNext().then(hasNext => {
+            console.log({ hasNext });
+            if (hasNext) {
+              return watch.next().then(next => {
+                bucket.push(next);
+                return exhaust();
+              });
+            } else {
+              const finalOperation = bucket.pop();
+              expect(finalOperation.operationType).to.equal('insert');
+              expect(finalOperation.fullDocument).to.include({ x: 2 });
+              return new Promise(resolve => watch.close(resolve));
+            }
+          });
+        }
+        return exhaust();
+      }
+    });
+  });
 });
